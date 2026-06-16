@@ -1,11 +1,27 @@
-import pkg from 'bullmq';
+import { Queue, Worker } from 'bullmq';
 import dotenv from 'dotenv';
 import { getRedisClient } from '../config/redis.js';
 import Capsule from '../models/Capsule.js';
 import { sendEmail } from '../utils/sendEmail.js';
 
 dotenv.config();
-const { Queue, Worker, QueueScheduler } = pkg;
+
+// Catch Redis / BullMQ connection errors that surface as unhandled rejections
+// when the Upstash host is not reachable (e.g. local dev without internet).
+process.on('unhandledRejection', (err) => {
+  if (err && (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET')) {
+    // Silently swallow — Redis unreachable in local dev, jobs are disabled.
+    return;
+  }
+  // Re-throw all other unhandled rejections so real bugs still crash the process.
+  throw err;
+});
+
+// A no-op error handler so 'error' events on Workers / Queues don't crash.
+const silenceErrors = (emitter) => {
+  emitter.on('error', () => {});
+  return emitter;
+};
 
 let connection = null;
 try {
@@ -15,18 +31,14 @@ try {
 }
 
 export const unlockNotifierQueue = connection
-  ? new Queue('unlock-notifier', { connection })
+  ? silenceErrors(new Queue('unlock-notifier', { connection }))
   : null;
 export const selfDestructQueue = connection
-  ? new Queue('self-destruct', { connection })
+  ? silenceErrors(new Queue('self-destruct', { connection }))
   : null;
-export const cleanupQueue = connection ? new Queue('cleanup', { connection }) : null;
-
-if (connection) {
-  new QueueScheduler('unlock-notifier', { connection });
-  new QueueScheduler('self-destruct', { connection });
-  new QueueScheduler('cleanup', { connection });
-}
+export const cleanupQueue = connection
+  ? silenceErrors(new Queue('cleanup', { connection }))
+  : null;
 
 export const scheduleUnlockEmail = async (capsule) => {
   if (!unlockNotifierQueue) return;
@@ -48,9 +60,9 @@ export const scheduleSelfDestruct = async (capsule) => {
   );
 };
 
-// Workers
+// Workers — only started when Redis is available
 if (connection) {
-  new Worker(
+  const unlockNotifierWorker = silenceErrors(new Worker(
     'unlock-notifier',
     async (job) => {
       const { capsuleId, notifyEmail, slug } = job.data;
@@ -66,35 +78,50 @@ if (connection) {
         html: `<p>Your capsule is now available: <a href="${url}">${url}</a></p>`
       });
     },
-    { connection }
-  );
+    {
+      connection,
+      stalledInterval: 86_400_000, // 24h — minimises reconnects when Redis is unreachable locally
+    }
+  ));
 
-  new Worker(
+  unlockNotifierWorker.on('completed', (job) => {
+    console.log(`Unlock email job completed for capsule ${job.data?.capsuleId}`);
+  });
+
+  unlockNotifierWorker.on('failed', (job, err) => {
+    console.error(
+      `Unlock email job failed for capsule ${job?.data?.capsuleId}: ${err?.message || err}`
+    );
+  });
+
+  silenceErrors(new Worker(
     'self-destruct',
     async (job) => {
       const { capsuleId } = job.data;
       await Capsule.findByIdAndDelete(capsuleId);
     },
-    { connection }
-  );
+    { connection, stalledInterval: 86_400_000 }
+  ));
 
-  new Worker(
+  silenceErrors(new Worker(
     'cleanup',
     async () => {
       const now = new Date();
       await Capsule.deleteMany({ expiresAt: { $lt: now } });
     },
-    { connection }
-  );
+    { connection, stalledInterval: 86_400_000 }
+  ));
 
   // Schedule daily cleanup job
   (async () => {
-    await cleanupQueue.add(
-      'daily-cleanup',
-      {},
-      {
-        repeat: { cron: '0 0 * * *' } // every midnight
-      }
-    );
+    try {
+      await cleanupQueue.add(
+        'daily-cleanup',
+        {},
+        { repeat: { cron: '0 0 * * *' } } // every midnight
+      );
+    } catch (err) {
+      console.warn('Could not schedule daily cleanup job:', err.message);
+    }
   })();
 }
