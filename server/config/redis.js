@@ -27,8 +27,26 @@ export const getRedisClient = () => {
       throw new Error('Invalid REDIS_URL. Expected redis:// or rediss:// URL from Upstash');
     }
     redisClient = new Redis(url, {
-      maxRetriesPerRequest: null
+      maxRetriesPerRequest: null,
+      // Give up reconnecting after 3 attempts (keeps local dev clean when
+      // Upstash is not reachable). In production the host resolves fine.
+      retryStrategy(times) {
+        if (times > 3) {
+          console.warn(`Redis: could not connect after ${times} attempts — background jobs disabled.`);
+          return null; // stop retrying
+        }
+        return Math.min(times * 200, 1000); // exponential back-off
+      },
+      // Don't queue commands while offline — fail fast
+      enableOfflineQueue: false,
+    });
+
+    redisClient.on('error', (err) => {
+      // Suppress repeated ENOTFOUND / ECONNREFUSED noise in dev
+      if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED') return;
+      console.error('Redis error:', err.message);
     });
   }
   return redisClient;
 };
+
