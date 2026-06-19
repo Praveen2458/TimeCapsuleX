@@ -2,8 +2,23 @@ import nodemailer from 'nodemailer';
 
 const createTransporter = () => {
   const { EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASS } = process.env;
+  const looksLikePlaceholder = (value = '') => {
+    const v = String(value).toLowerCase();
+    return (
+      v.includes('your_email') ||
+      v.includes('your_app_password') ||
+      v.includes('example.com')
+    );
+  };
+
   if (!EMAIL_HOST || !EMAIL_PORT || !EMAIL_USER || !EMAIL_PASS) {
     throw new Error('Email environment variables are not fully set');
+  }
+
+  if (looksLikePlaceholder(EMAIL_USER) || looksLikePlaceholder(EMAIL_PASS)) {
+    throw new Error(
+      'Email credentials are placeholders. Set real EMAIL_USER and EMAIL_PASS (Gmail App Password) in server/.env'
+    );
   }
 
   return nodemailer.createTransport({

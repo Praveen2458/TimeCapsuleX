@@ -9,7 +9,13 @@ const CapsuleForm = ({ onSubmit, loading }) => {
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    onSubmit({ content, unlockAt, selfDestruct, password: password || undefined, notifyEmail: notifyEmail || undefined });
+    onSubmit({
+      content,
+      unlockAt: new Date(unlockAt).toISOString(),
+      selfDestruct,
+      password: password || undefined,
+      notifyEmail: notifyEmail || undefined
+    });
   };
 
   return (
